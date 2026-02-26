@@ -9,6 +9,96 @@ import time
 import sys
 import re
 from collections import deque
+from datetime import datetime
+
+
+# In-memory per-hour statistics
+# Key: datetime truncated to hour (YYYY-mm-dd HH:00)
+# Value: {"latencies": [ms, ...], "resets": int}
+hourly_stats = {}
+
+
+def _current_hour_key():
+    now = datetime.now()
+    return now.replace(minute=0, second=0, microsecond=0)
+
+
+def record_latency(latency_ms):
+    """Record a single successful ping latency (in ms) in the current hour."""
+    if latency_ms is None:
+        return
+    key = _current_hour_key()
+    stats = hourly_stats.setdefault(key, {"latencies": [], "resets": 0})
+    stats["latencies"].append(latency_ms)
+
+
+def record_reset():
+    """Record that a WiFi reset was attempted in the current hour."""
+    key = _current_hour_key()
+    stats = hourly_stats.setdefault(key, {"latencies": [], "resets": 0})
+    stats["resets"] += 1
+
+
+def _summarize_latencies(latencies):
+    """Return min, q1, median, q3, max for a list of latencies."""
+    if not latencies:
+        return None
+    values = sorted(latencies)
+    n = len(values)
+
+    def idx(p):
+        # Simple percentile index: 0 <= index <= n-1
+        return int(round((n - 1) * p))
+
+    return {
+        "min": values[0],
+        "q1": values[idx(0.25)],
+        "median": values[idx(0.5)],
+        "q3": values[idx(0.75)],
+        "max": values[-1],
+    }
+
+
+def print_last_hours_summary(max_hours=4):
+    """
+    Print a summary log for up to the last `max_hours` hour buckets,
+    including the current (possibly partial) hour.
+    """
+    if not hourly_stats:
+        print("\nNo latency statistics collected.")
+        return
+
+    current_hour = _current_hour_key()
+    hours = sorted(h for h in hourly_stats.keys() if h <= current_hour)
+    if not hours:
+        print("\nNo latency statistics collected.")
+        return
+
+    # Last `max_hours` buckets: typically current hour + previous 3
+    selected = hours[-max_hours:]
+
+    print("\n================ Hourly Latency Summary ================")
+    for hour in selected:
+        stats = hourly_stats[hour]
+        date_label = hour.strftime("%Y-%m-%d %H:00")
+        summary = _summarize_latencies(stats["latencies"])
+
+        print(f"\n{date_label}")
+        if summary:
+            print(f"  pings: {len(stats['latencies'])}")
+            print(
+                "  latency (ms): "
+                f"min={summary['min']} "
+                f"q1={summary['q1']} "
+                f"median={summary['median']} "
+                f"q3={summary['q3']} "
+                f"max={summary['max']}"
+            )
+        else:
+            print("  pings: 0 (no successful latency measurements)")
+
+        print(f"  wifi resets: {stats['resets']}")
+    print("========================================================\n")
 
 
 def ping_host(host="www.google.com", timeout=3):
@@ -223,7 +313,8 @@ def reconnect_wifi():
         time.sleep(5)
         
         # Verify connection
-        if ping_host():
+        success, _ = ping_host()
+        if success:
             print("✓ WiFi reconnected successfully!")
             return True
         else:
@@ -271,6 +362,7 @@ def main():
             if success and latency_ms is not None:
                 is_slow = latency_ms > latency_threshold_ms
                 latency_window.append(is_slow)
+                record_latency(latency_ms)
             elif success:
                 # Successful ping but no latency parsed; treat as not-slow to avoid false triggers
                 latency_window.append(False)
@@ -300,6 +392,7 @@ def main():
                 if consecutive_failures >= required_failures:
                     print(f"\n⚠ {consecutive_failures} consecutive failures detected!")
                     reconnect_wifi()
+                    record_reset()
                     consecutive_failures = 0  # Reset counter after reconnection attempt
                     latency_window.clear()
                     print("\n" + "="*50)
@@ -312,6 +405,7 @@ def main():
                 if slow_count >= slow_threshold_count:
                     print(f"\n⚠ Slow connection detected: {slow_count} of last {window_size} pings exceeded {latency_threshold_ms} ms")
                     reconnect_wifi()
+                    record_reset()
                     consecutive_failures = 0
                     latency_window.clear()
                     print("\n" + "="*50)
@@ -323,6 +417,7 @@ def main():
             
     except KeyboardInterrupt:
         print("\n\nScript stopped by user.")
+        print_last_hours_summary(max_hours=4)
         sys.exit(0)
     except Exception as e:
         print(f"\nUnexpected error: {e}")
