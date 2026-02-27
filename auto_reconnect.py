@@ -8,6 +8,8 @@ import subprocess
 import time
 import sys
 import re
+import csv
+import os
 from collections import deque
 from datetime import datetime
 
@@ -16,6 +18,63 @@ from datetime import datetime
 # Key: datetime truncated to hour (YYYY-mm-dd HH:00)
 # Value: {"latencies": [ms, ...], "resets": int}
 hourly_stats = {}
+CSV_LOG_PATH = "auto_reconnect_log.csv"
+
+
+def _ensure_csv_header():
+    if os.path.exists(CSV_LOG_PATH):
+        return
+    try:
+        with open(CSV_LOG_PATH, mode="w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(
+                [
+                    "timestamp",
+                    "date",
+                    "hour",
+                    "success",
+                    "latency_ms",
+                    "is_slow",
+                    "consecutive_failures",
+                    "slow_window_count",
+                    "reset_reason",
+                ]
+            )
+    except Exception as e:
+        print(f"Error initializing CSV log: {e}")
+
+
+def log_csv_row(
+    *,
+    now,
+    success,
+    latency_ms,
+    is_slow,
+    consecutive_failures,
+    slow_window_count,
+    reset_reason,
+):
+    """Append a single row to the CSV log."""
+    try:
+        _ensure_csv_header()
+        hour_key = now.replace(minute=0, second=0, microsecond=0)
+        with open(CSV_LOG_PATH, mode="a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(
+                [
+                    now.strftime("%Y-%m-%d %H:%M:%S"),
+                    now.strftime("%Y-%m-%d"),
+                    hour_key.strftime("%H:00"),
+                    int(bool(success)),
+                    "" if latency_ms is None else int(latency_ms),
+                    "" if is_slow is None else int(bool(is_slow)),
+                    int(consecutive_failures),
+                    "" if slow_window_count is None else int(slow_window_count),
+                    reset_reason or "",
+                ]
+            )
+    except Exception as e:
+        print(f"Error writing to CSV log: {e}")
 
 
 def _current_hour_key():
@@ -355,6 +414,8 @@ def main():
     
     try:
         while True:
+            now = datetime.now()
+
             # Ping the host
             success, latency_ms = ping_host(host)
 
@@ -365,12 +426,16 @@ def main():
                 record_latency(latency_ms)
             elif success:
                 # Successful ping but no latency parsed; treat as not-slow to avoid false triggers
+                is_slow = False
                 latency_window.append(False)
             else:
                 # On failures we still want to track that the connection is bad.
                 # Treat failures as "slow" for the purpose of latency window, so
                 # intermittent failures don't hide poor connectivity.
+                is_slow = True
                 latency_window.append(True)
+
+            reset_reason = None
 
             if success:
                 if consecutive_failures > 0:
@@ -386,13 +451,14 @@ def main():
                 consecutive_failures = 0
             else:
                 consecutive_failures += 1
-                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ✗ Ping failed ({consecutive_failures}/{required_failures} consecutive failures)")
+                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ✗ Ping failed ({consecutive_failures}/{required_failures} consecutive_failures)")
                 
                 # If we've reached the threshold, reconnect WiFi
                 if consecutive_failures >= required_failures:
                     print(f"\n⚠ {consecutive_failures} consecutive failures detected!")
                     reconnect_wifi()
                     record_reset()
+                    reset_reason = "failures"
                     consecutive_failures = 0  # Reset counter after reconnection attempt
                     latency_window.clear()
                     print("\n" + "="*50)
@@ -401,16 +467,30 @@ def main():
 
             # Check latency-based reconnect condition (7 of last 10 pings slow)
             if len(latency_window) == window_size:
-                slow_count = sum(1 for is_slow in latency_window if is_slow)
+                slow_count = sum(1 for is_slow_entry in latency_window if is_slow_entry)
                 if slow_count >= slow_threshold_count:
                     print(f"\n⚠ Slow connection detected: {slow_count} of last {window_size} pings exceeded {latency_threshold_ms} ms")
                     reconnect_wifi()
                     record_reset()
+                    reset_reason = "latency"
                     consecutive_failures = 0
                     latency_window.clear()
                     print("\n" + "="*50)
                     print("Resuming monitoring...")
                     print("="*50 + "\n")
+            else:
+                slow_count = None
+
+            # Log this ping to CSV
+            log_csv_row(
+                now=now,
+                success=success,
+                latency_ms=latency_ms,
+                is_slow=is_slow if success or (not success) else None,
+                consecutive_failures=consecutive_failures,
+                slow_window_count=slow_count,
+                reset_reason=reset_reason,
+            )
             
             # Wait before next ping
             time.sleep(ping_interval)
