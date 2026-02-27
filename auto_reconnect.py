@@ -18,63 +18,86 @@ from datetime import datetime
 # Key: datetime truncated to hour (YYYY-mm-dd HH:00)
 # Value: {"latencies": [ms, ...], "resets": int}
 hourly_stats = {}
-CSV_LOG_PATH = "auto_reconnect_log.csv"
+
+# Reset/SSID tracking (based only on resets + initial SSID)
+reset_events = []  # list of (datetime, ssid)
+script_start_time = None
+
+# Hourly CSV summary log
+HOURLY_CSV_LOG_PATH = "auto_reconnect_hourly.csv"
 
 
-def _ensure_csv_header():
-    if os.path.exists(CSV_LOG_PATH):
+def _ensure_hourly_csv_header():
+    if os.path.exists(HOURLY_CSV_LOG_PATH):
         return
     try:
-        with open(CSV_LOG_PATH, mode="w", newline="", encoding="utf-8") as f:
+        with open(HOURLY_CSV_LOG_PATH, mode="w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(
                 [
-                    "timestamp",
                     "date",
                     "hour",
-                    "success",
-                    "latency_ms",
-                    "is_slow",
-                    "consecutive_failures",
-                    "slow_window_count",
-                    "reset_reason",
+                    "ping_count",
+                    "latency_min_ms",
+                    "latency_q1_ms",
+                    "latency_median_ms",
+                    "latency_q3_ms",
+                    "latency_max_ms",
+                    "wifi_resets",
+                    "ssid",
+                    "ssid_minutes",
                 ]
             )
     except Exception as e:
-        print(f"Error initializing CSV log: {e}")
+        print(f"Error initializing hourly CSV log: {e}")
 
 
-def log_csv_row(
-    *,
-    now,
-    success,
-    latency_ms,
-    is_slow,
-    consecutive_failures,
-    slow_window_count,
-    reset_reason,
-):
-    """Append a single row to the CSV log."""
+def log_hourly_to_csv(hour, stats, summary, ssid_minutes):
+    """Append one row per SSID for this hour to the hourly CSV log."""
     try:
-        _ensure_csv_header()
-        hour_key = now.replace(minute=0, second=0, microsecond=0)
-        with open(CSV_LOG_PATH, mode="a", newline="", encoding="utf-8") as f:
+        _ensure_hourly_csv_header()
+        date_str = hour.strftime("%Y-%m-%d")
+        hour_label = hour.strftime("%H:00")
+        ping_count = len(stats["latencies"])
+
+        with open(HOURLY_CSV_LOG_PATH, mode="a", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow(
-                [
-                    now.strftime("%Y-%m-%d %H:%M:%S"),
-                    now.strftime("%Y-%m-%d"),
-                    hour_key.strftime("%H:00"),
-                    int(bool(success)),
-                    "" if latency_ms is None else int(latency_ms),
-                    "" if is_slow is None else int(bool(is_slow)),
-                    int(consecutive_failures),
-                    "" if slow_window_count is None else int(slow_window_count),
-                    reset_reason or "",
-                ]
-            )
+            if ssid_minutes:
+                for ssid, minutes in ssid_minutes.items():
+                    writer.writerow(
+                        [
+                            date_str,
+                            hour_label,
+                            ping_count,
+                            "" if summary is None else summary["min"],
+                            "" if summary is None else summary["q1"],
+                            "" if summary is None else summary["median"],
+                            "" if summary is None else summary["q3"],
+                            "" if summary is None else summary["max"],
+                            stats["resets"],
+                            ssid,
+                            int(round(minutes)),
+                        ]
+                    )
+            else:
+                # No SSID info; still log one row
+                writer.writerow(
+                    [
+                        date_str,
+                        hour_label,
+                        ping_count,
+                        "" if summary is None else summary["min"],
+                        "" if summary is None else summary["q1"],
+                        "" if summary is None else summary["median"],
+                        "" if summary is None else summary["q3"],
+                        "" if summary is None else summary["max"],
+                        stats["resets"],
+                        "",
+                        "",
+                    ]
+                )
     except Exception as e:
-        print(f"Error writing to CSV log: {e}")
+        print(f"Error writing hourly CSV log: {e}")
 
 
 def _current_hour_key():
@@ -96,6 +119,11 @@ def record_reset():
     key = _current_hour_key()
     stats = hourly_stats.setdefault(key, {"latencies": [], "resets": 0})
     stats["resets"] += 1
+
+
+def record_ssid_event(when, ssid):
+    """Record that from `when` onward we are on `ssid` (until the next event)."""
+    reset_events.append((when, ssid or "unknown"))
 
 
 def _summarize_latencies(latencies):
@@ -142,6 +170,11 @@ def print_last_hours_summary(max_hours=4):
         date_label = hour.strftime("%Y-%m-%d %H:00")
         summary = _summarize_latencies(stats["latencies"])
 
+        # Compute SSID usage minutes for this hour
+        hour_start = hour
+        hour_end = hour_start.replace(minute=59, second=59, microsecond=999999)
+        ssid_minutes = compute_ssid_minutes_for_hour(hour_start, hour_end)
+
         print(f"\n{date_label}")
         if summary:
             print(f"  pings: {len(stats['latencies'])}")
@@ -157,7 +190,73 @@ def print_last_hours_summary(max_hours=4):
             print("  pings: 0 (no successful latency measurements)")
 
         print(f"  wifi resets: {stats['resets']}")
+
+        if ssid_minutes:
+            print("  SSID usage (minutes):")
+            for ssid, minutes in ssid_minutes.items():
+                print(f"    {ssid}: {minutes:.1f}")
+        else:
+            print("  SSID usage: (no SSID data)")
+
+        # Log to CSV as well
+        log_hourly_to_csv(hour, stats, summary, ssid_minutes)
+
     print("========================================================\n")
+
+
+def compute_ssid_minutes_for_hour(hour_start, hour_end):
+    """
+    Estimate how many minutes each SSID was used in [hour_start, hour_end],
+    based only on reset events (and the initial SSID event).
+    """
+    if script_start_time is None or not reset_events:
+        return {}
+
+    # Ensure events are in chronological order
+    events = sorted(reset_events, key=lambda e: e[0])
+
+    # Determine SSID active at the start of this hour
+    current_ssid = "unknown"
+    for when, ssid in events:
+        if when <= hour_start:
+            current_ssid = ssid or "unknown"
+        else:
+            break
+
+    # Start time for this hour's accounting
+    cursor = max(script_start_time, hour_start)
+    if cursor > hour_end:
+        return {}
+
+    minutes_per_ssid = {}
+
+    # Iterate over events inside this hour
+    for when, ssid in events:
+        if when <= cursor:
+            continue
+        if when > hour_end:
+            break
+
+        # Time from cursor until this event belongs to current_ssid
+        segment_end = when
+        if segment_end > hour_end:
+            segment_end = hour_end
+
+        if segment_end > cursor:
+            delta_minutes = (segment_end - cursor).total_seconds() / 60.0
+            minutes_per_ssid[current_ssid] = minutes_per_ssid.get(current_ssid, 0.0) + delta_minutes
+
+        # Move cursor and switch SSID
+        cursor = when
+        current_ssid = ssid or "unknown"
+
+    # Final segment until end of hour
+    if cursor < hour_end:
+        delta_minutes = (hour_end - cursor).total_seconds() / 60.0
+        minutes_per_ssid[current_ssid] = minutes_per_ssid.get(current_ssid, 0.0) + delta_minutes
+
+    # Filter out zero-minute entries
+    return {k: v for k, v in minutes_per_ssid.items() if v > 0}
 
 
 def ping_host(host="www.google.com", timeout=3):
@@ -391,6 +490,8 @@ def main():
     - 4 consecutive failures occur, or
     - 7 of the last 10 pings exceed the latency threshold (slow connection).
     """
+    global script_start_time
+
     host = "www.google.com"
     consecutive_failures = 0
     required_failures = 4
@@ -411,7 +512,12 @@ def main():
     print(f"Ping interval: {ping_interval} seconds")
     print("="*50)
     print("\nPress Ctrl+C to stop\n")
-    
+
+    # Initialize script start time and initial SSID (baseline)
+    script_start_time = datetime.now()
+    initial_ssid = get_wifi_ssid()
+    record_ssid_event(script_start_time, initial_ssid)
+
     try:
         while True:
             now = datetime.now()
@@ -458,6 +564,8 @@ def main():
                     print(f"\n⚠ {consecutive_failures} consecutive failures detected!")
                     reconnect_wifi()
                     record_reset()
+                    # Record new SSID from this point forward
+                    record_ssid_event(datetime.now(), get_wifi_ssid())
                     reset_reason = "failures"
                     consecutive_failures = 0  # Reset counter after reconnection attempt
                     latency_window.clear()
@@ -472,26 +580,15 @@ def main():
                     print(f"\n⚠ Slow connection detected: {slow_count} of last {window_size} pings exceeded {latency_threshold_ms} ms")
                     reconnect_wifi()
                     record_reset()
+                    # Record new SSID from this point forward
+                    record_ssid_event(datetime.now(), get_wifi_ssid())
                     reset_reason = "latency"
                     consecutive_failures = 0
                     latency_window.clear()
                     print("\n" + "="*50)
                     print("Resuming monitoring...")
                     print("="*50 + "\n")
-            else:
-                slow_count = None
 
-            # Log this ping to CSV
-            log_csv_row(
-                now=now,
-                success=success,
-                latency_ms=latency_ms,
-                is_slow=is_slow if success or (not success) else None,
-                consecutive_failures=consecutive_failures,
-                slow_window_count=slow_count,
-                reset_reason=reset_reason,
-            )
-            
             # Wait before next ping
             time.sleep(ping_interval)
             
