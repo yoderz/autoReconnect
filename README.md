@@ -32,7 +32,7 @@ In an office with multiple WiFi hotspots, the connection often becomes slow or f
 1. Clone or copy this repository into a folder, e.g.:
 
 ```bash
-git clone [https://github.com/yoderz/autoReconnect](https://github.com/yoderz/autoReconnect) autoReconnect
+git clone https://github.com/yoderz/autoReconnect autoReconnect
 cd autoReconnect
 ```
 
