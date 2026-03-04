@@ -223,9 +223,12 @@ def compute_ssid_minutes_for_hour(hour_start, hour_end):
         else:
             break
 
+    # Don't attribute time beyond when the script actually stopped running
+    effective_end = min(hour_end, datetime.now())
+
     # Start time for this hour's accounting
     cursor = max(script_start_time, hour_start)
-    if cursor > hour_end:
+    if cursor > effective_end:
         return {}
 
     minutes_per_ssid = {}
@@ -234,13 +237,13 @@ def compute_ssid_minutes_for_hour(hour_start, hour_end):
     for when, ssid in events:
         if when <= cursor:
             continue
-        if when > hour_end:
+        if when > effective_end:
             break
 
         # Time from cursor until this event belongs to current_ssid
         segment_end = when
-        if segment_end > hour_end:
-            segment_end = hour_end
+        if segment_end > effective_end:
+            segment_end = effective_end
 
         if segment_end > cursor:
             delta_minutes = (segment_end - cursor).total_seconds() / 60.0
@@ -250,9 +253,9 @@ def compute_ssid_minutes_for_hour(hour_start, hour_end):
         cursor = when
         current_ssid = ssid or "unknown"
 
-    # Final segment until end of hour
-    if cursor < hour_end:
-        delta_minutes = (hour_end - cursor).total_seconds() / 60.0
+    # Final segment until end of hour (or script end)
+    if cursor < effective_end:
+        delta_minutes = (effective_end - cursor).total_seconds() / 60.0
         minutes_per_ssid[current_ssid] = minutes_per_ssid.get(current_ssid, 0.0) + delta_minutes
 
     # Filter out zero-minute entries

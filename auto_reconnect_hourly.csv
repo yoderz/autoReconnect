@@ -1,0 +1,5 @@
+date,hour,ping_count,latency_min_ms,latency_q1_ms,latency_median_ms,latency_q3_ms,latency_max_ms,wifi_resets,ssid,ssid_minutes
+2026-03-03,12:00,9,116,119,120,125,133,0,unknown,1
+2026-03-03,13:00,168,22,206,223,269,2707,11,SIL-OFF_STLINK-CN,13
+2026-03-03,13:00,168,22,206,223,269,2707,11,SIL-Office_DirDen2,40
+2026-03-03,13:00,168,22,206,223,269,2707,11,unknown,7
