@@ -497,13 +497,13 @@ def main():
 
     host = "www.google.com"
     consecutive_failures = 0
-    required_failures = 4
+    required_failures = 6
     ping_interval = 5  # seconds between pings
 
     # Latency-based reconnect settings
     latency_threshold_ms = 300
-    window_size = 10
-    slow_threshold_count = 7
+    window_size = 20
+    slow_threshold_count = 14
     latency_window = deque(maxlen=window_size)  # stores booleans: True if ping > threshold
     
     print("="*50)
