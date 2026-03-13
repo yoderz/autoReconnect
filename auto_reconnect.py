@@ -11,7 +11,7 @@ import re
 import csv
 import os
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta
 
 
 # In-memory per-hour statistics
@@ -19,9 +19,10 @@ from datetime import datetime
 # Value: {"latencies": [ms, ...], "resets": int}
 hourly_stats = {}
 
-# Reset/SSID tracking (based only on resets + initial SSID)
+# Reset/SSID tracking (based on initial SSID, resets, and periodic checks)
 reset_events = []  # list of (datetime, ssid)
 script_start_time = None
+current_ssid = "unknown"
 
 # Hourly CSV summary log
 HOURLY_CSV_LOG_PATH = "auto_reconnect_hourly.csv"
@@ -123,7 +124,9 @@ def record_reset():
 
 def record_ssid_event(when, ssid):
     """Record that from `when` onward we are on `ssid` (until the next event)."""
-    reset_events.append((when, ssid or "unknown"))
+    global current_ssid
+    current_ssid = ssid or "unknown"
+    reset_events.append((when, current_ssid))
 
 
 def _summarize_latencies(latencies):
@@ -521,9 +524,23 @@ def main():
     initial_ssid = get_wifi_ssid()
     record_ssid_event(script_start_time, initial_ssid)
 
+    # Schedule periodic SSID checks on the hour
+    hour_start = script_start_time.replace(minute=0, second=0, microsecond=0)
+    if script_start_time == hour_start:
+        next_ssid_check = hour_start
+    else:
+        next_ssid_check = hour_start + timedelta(hours=1)
+
     try:
         while True:
             now = datetime.now()
+
+            # Periodic SSID check each hour
+            if now >= next_ssid_check:
+                ssid_now = get_wifi_ssid()
+                if ssid_now and ssid_now != current_ssid:
+                    record_ssid_event(now, ssid_now)
+                next_ssid_check = next_ssid_check + timedelta(hours=1)
 
             # Ping the host
             success, latency_ms = ping_host(host)
