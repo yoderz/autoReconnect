@@ -721,22 +721,22 @@ def main():
             if success:
                 if consecutive_failures > 0:
                     if latency_ms is not None:
-                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ✓ Ping successful ({latency_ms} ms) (recovered from {consecutive_failures} failures)")
+                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ✓ Ping ({latency_ms} ms) (recovered from {consecutive_failures} failures)")
                     else:
-                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ✓ Ping successful (recovered from {consecutive_failures} failures)")
+                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ✓ Ping (recovered from {consecutive_failures} failures)")
                 else:
                     if latency_ms is not None:
-                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ✓ Ping successful ({latency_ms} ms)")
+                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ✓ Ping ({latency_ms} ms)")
                     else:
-                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ✓ Ping successful")
+                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ✓ Ping ")
                 consecutive_failures = 0
             else:
                 consecutive_failures += 1
-                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ✗ Ping failed ({consecutive_failures}/{required_failures} consecutive_failures)")
+                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ✗ Failed ({consecutive_failures}/{required_failures} consecutive_failures)")
                 
                 # If we've reached the threshold, reconnect WiFi
                 if consecutive_failures >= required_failures:
-                    print(f"\n⚠ {consecutive_failures} consecutive failures detected!")
+                    print(f"\n⚠ {consecutive_failures} consecutive failures!")
                     reconnect_wifi()
                     record_reset()
                     # Record new SSID from this point forward
@@ -756,7 +756,7 @@ def main():
             if len(latency_window) == window_size:
                 slow_count = sum(1 for is_slow_entry in latency_window if is_slow_entry)
                 if slow_count >= slow_threshold_count:
-                    print(f"\n⚠ Slow connection detected: {slow_count} of last {window_size} pings exceeded {latency_threshold_ms} ms")
+                    print(f"\n⚠ Slow connection: {slow_count} of last {window_size} pings exceeded {latency_threshold_ms} ms")
                     reconnect_wifi()
                     record_reset()
                     # Record new SSID from this point forward
