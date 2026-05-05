@@ -27,6 +27,65 @@ current_ssid = "unknown"
 # Hourly CSV summary log
 HOURLY_CSV_LOG_PATH = "auto_reconnect_hourly.csv"
 
+# Persistent SSID usage log (across runs)
+SSID_USAGE_CSV_PATH = "ssid_usage.csv"
+
+
+def load_ssid_usage_csv(path=SSID_USAGE_CSV_PATH):
+    """
+    Load SSID usage from CSV.
+    Format: SSID,Hours used,Total Resets
+    Returns dict: {ssid: {"hours_used": float, "total_resets": int}}
+    """
+    data = {}
+    if not os.path.exists(path):
+        return data
+
+    try:
+        with open(path, mode="r", newline="", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            for row in reader:
+                if not row:
+                    continue
+                if row[0].strip().lower() == "ssid":
+                    continue
+                if len(row) < 3:
+                    continue
+                ssid = row[0].strip()
+                if not ssid:
+                    continue
+                try:
+                    hours_used = float(row[1])
+                except Exception:
+                    hours_used = 0.0
+                try:
+                    total_resets = int(float(row[2]))
+                except Exception:
+                    total_resets = 0
+
+                data[ssid] = {"hours_used": hours_used, "total_resets": total_resets}
+    except Exception as e:
+        print(f"Error reading SSID usage CSV: {e}")
+
+    return data
+
+
+def write_ssid_usage_csv(data, path=SSID_USAGE_CSV_PATH):
+    """Write SSID usage CSV sorted by hours_used descending."""
+    try:
+        rows = sorted(
+            ((ssid, v.get("hours_used", 0.0), v.get("total_resets", 0)) for ssid, v in data.items()),
+            key=lambda r: (r[1], r[2], r[0]),
+            reverse=True,
+        )
+        with open(path, mode="w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["SSID", "Hours used", "Total Resets"])
+            for ssid, hours_used, total_resets in rows:
+                writer.writerow([ssid, f"{hours_used:.4f}", int(total_resets)])
+    except Exception as e:
+        print(f"Error writing SSID usage CSV: {e}")
+
 
 def _ensure_hourly_csv_header():
     if os.path.exists(HOURLY_CSV_LOG_PATH):
@@ -127,6 +186,12 @@ def record_ssid_event(when, ssid):
     global current_ssid
     current_ssid = ssid or "unknown"
     reset_events.append((when, current_ssid))
+
+
+def _hour_window(dt):
+    start = dt.replace(minute=0, second=0, microsecond=0)
+    end = start.replace(minute=59, second=59, microsecond=999999)
+    return start, end
 
 
 def _summarize_latencies(latencies):
@@ -265,6 +330,22 @@ def compute_ssid_minutes_for_hour(hour_start, hour_end):
     return {k: v for k, v in minutes_per_ssid.items() if v > 0}
 
 
+def finalize_hour_to_ssid_usage(hour_start, hour_end, ssid_usage, resets_this_hour):
+    """
+    Update persistent ssid_usage (hours_used, total_resets) from the provided hour range.
+    - hours_used: accumulate minutes_per_ssid / 60.0
+    - total_resets: add resets_this_hour counts
+    """
+    minutes_per_ssid = compute_ssid_minutes_for_hour(hour_start, hour_end)
+    for ssid, minutes in minutes_per_ssid.items():
+        entry = ssid_usage.setdefault(ssid, {"hours_used": 0.0, "total_resets": 0})
+        entry["hours_used"] = float(entry.get("hours_used", 0.0)) + (minutes / 60.0)
+
+    for ssid, count in resets_this_hour.items():
+        entry = ssid_usage.setdefault(ssid, {"hours_used": 0.0, "total_resets": 0})
+        entry["total_resets"] = int(entry.get("total_resets", 0)) + int(count)
+
+
 def ping_host(host="www.google.com", timeout=3):
     """
     Ping a host and return True if successful, False otherwise.
@@ -317,6 +398,16 @@ def ping_host(host="www.google.com", timeout=3):
     except Exception as e:
         print(f"Error pinging {host}: {e}")
         return False, None
+
+
+def ping_burst(host="www.google.com", count=5, timeout=3):
+    """Ping `count` times back-to-back. Returns number of successes."""
+    successes = 0
+    for _ in range(count):
+        ok, _lat = ping_host(host, timeout=timeout)
+        if ok:
+            successes += 1
+    return successes
 
 
 def get_wifi_profile_name():
@@ -384,6 +475,40 @@ def get_wifi_ssid():
     except Exception as e:
         print(f"Error getting WiFi SSID: {e}")
         return None
+
+
+def list_saved_wifi_profiles():
+    """Return a set of saved WiFi profile names from Windows."""
+    profiles = set()
+    try:
+        result = subprocess.run(
+            ["netsh", "wlan", "show", "profiles"],
+            capture_output=True,
+            text=True
+        )
+        if result.returncode != 0:
+            return profiles
+        for line in result.stdout.splitlines():
+            match = re.search(r"All User Profile\s*:\s*(.+)", line)
+            if match:
+                profiles.add(match.group(1).strip())
+    except Exception as e:
+        print(f"Error listing WiFi profiles: {e}")
+    return profiles
+
+
+def connect_to_wifi_profile(profile_name):
+    """Attempt to connect to a saved WiFi profile by name."""
+    try:
+        result = subprocess.run(
+            ["netsh", "wlan", "connect", f"name={profile_name}"],
+            capture_output=True,
+            text=True
+        )
+        return result.returncode == 0
+    except Exception as e:
+        print(f"Error connecting to WiFi profile {profile_name}: {e}")
+        return False
 
 
 def reconnect_wifi():
@@ -476,14 +601,14 @@ def reconnect_wifi():
         print("\nWaiting 5 seconds for connection to establish...")
         time.sleep(5)
         
-        # Verify connection
-        success, _ = ping_host()
-        if success:
-            print("✓ WiFi reconnected successfully!")
+        # Verify connection (burst ping)
+        successes = ping_burst(count=5)
+        if successes >= 3:
+            print(f"✓ Connection looks healthy ({successes}/5 pings succeeded)")
             return True
         else:
-            print("⚠ WiFi reconnected but ping test failed. Connection may still be establishing...")
-            return True  # Still return True as reconnection was attempted
+            print(f"⚠ Connection still looks poor ({successes}/5 pings succeeded)")
+            return False
             
     except Exception as e:
         print(f"Error reconnecting WiFi: {e}")
@@ -524,6 +649,16 @@ def main():
     initial_ssid = get_wifi_ssid()
     record_ssid_event(script_start_time, initial_ssid)
 
+    # Load SSID usage statistics from previous runs
+    ssid_usage = load_ssid_usage_csv()
+
+    # Track resets per SSID within the current hour
+    resets_this_hour = {}
+
+    # Ping counter for sampling SSID every N pings
+    ping_counter = 0
+    ssid_sample_every_pings = 12
+
     # Schedule periodic SSID checks on the hour
     hour_start = script_start_time.replace(minute=0, second=0, microsecond=0)
     if script_start_time == hour_start:
@@ -531,9 +666,22 @@ def main():
     else:
         next_ssid_check = hour_start + timedelta(hours=1)
 
+    # Schedule hourly SSID usage finalization on the hour
+    current_hour_start, current_hour_end = _hour_window(script_start_time)
+    next_hourly_finalize = current_hour_start + timedelta(hours=1)
+
     try:
         while True:
             now = datetime.now()
+
+            # Finalize SSID usage once per hour boundary
+            if now >= next_hourly_finalize:
+                prev_hour_start = next_hourly_finalize - timedelta(hours=1)
+                prev_hour_end = prev_hour_start.replace(minute=59, second=59, microsecond=999999)
+                finalize_hour_to_ssid_usage(prev_hour_start, prev_hour_end, ssid_usage, resets_this_hour)
+                write_ssid_usage_csv(ssid_usage)
+                resets_this_hour = {}
+                next_hourly_finalize = next_hourly_finalize + timedelta(hours=1)
 
             # Periodic SSID check each hour
             if now >= next_ssid_check:
@@ -541,6 +689,13 @@ def main():
                 if ssid_now and ssid_now != current_ssid:
                     record_ssid_event(now, ssid_now)
                 next_ssid_check = next_ssid_check + timedelta(hours=1)
+
+            # SSID sampling every N pings (only record if it changed)
+            ping_counter += 1
+            if ping_counter % ssid_sample_every_pings == 0:
+                ssid_now = get_wifi_ssid()
+                if ssid_now and ssid_now != current_ssid:
+                    record_ssid_event(now, ssid_now)
 
             # Ping the host
             success, latency_ms = ping_host(host)
@@ -586,6 +741,10 @@ def main():
                     record_reset()
                     # Record new SSID from this point forward
                     record_ssid_event(datetime.now(), get_wifi_ssid())
+                    resets_this_hour[current_ssid] = resets_this_hour.get(current_ssid, 0) + 1
+                    ssid_usage.setdefault(current_ssid, {"hours_used": 0.0, "total_resets": 0})
+                    ssid_usage[current_ssid]["total_resets"] = int(ssid_usage[current_ssid].get("total_resets", 0)) + 1
+                    write_ssid_usage_csv(ssid_usage)
                     reset_reason = "failures"
                     consecutive_failures = 0  # Reset counter after reconnection attempt
                     latency_window.clear()
@@ -602,12 +761,54 @@ def main():
                     record_reset()
                     # Record new SSID from this point forward
                     record_ssid_event(datetime.now(), get_wifi_ssid())
+                    resets_this_hour[current_ssid] = resets_this_hour.get(current_ssid, 0) + 1
+                    ssid_usage.setdefault(current_ssid, {"hours_used": 0.0, "total_resets": 0})
+                    ssid_usage[current_ssid]["total_resets"] = int(ssid_usage[current_ssid].get("total_resets", 0)) + 1
+                    write_ssid_usage_csv(ssid_usage)
                     reset_reason = "latency"
                     consecutive_failures = 0
                     latency_window.clear()
                     print("\n" + "="*50)
                     print("Resuming monitoring...")
                     print("="*50 + "\n")
+
+            # If we've reset the current SSID 3 times within this hour, try top 5 SSIDs
+            hour_key = _current_hour_key()
+            current_ssid_resets = resets_this_hour.get(current_ssid, 0)
+            if current_ssid_resets >= 3:
+                print(f"\n⚠ SSID '{current_ssid}' has been reset {current_ssid_resets} times this hour ({hour_key.strftime('%Y-%m-%d %H:00')}). Trying top SSIDs...")
+
+                saved_profiles = list_saved_wifi_profiles()
+                # Rank by hours_used desc
+                ranked = sorted(
+                    ssid_usage.items(),
+                    key=lambda kv: (kv[1].get("hours_used", 0.0), kv[1].get("total_resets", 0), kv[0]),
+                    reverse=True,
+                )
+                candidates = [ssid for ssid, _v in ranked if ssid in saved_profiles and ssid != current_ssid][:5]
+
+                switched = False
+                for candidate in candidates:
+                    print(f"Trying SSID/profile: {candidate}")
+                    if not connect_to_wifi_profile(candidate):
+                        print("  connect failed")
+                        continue
+                    time.sleep(5)
+                    successes = ping_burst(host=host, count=5)
+                    print(f"  ping burst: {successes}/5")
+                    if successes >= 3:
+                        record_ssid_event(datetime.now(), candidate)
+                        consecutive_failures = 0
+                        latency_window.clear()
+                        switched = True
+                        print(f"✓ Switched to {candidate}")
+                        break
+
+                # Avoid retrying failover every loop once threshold reached
+                if switched:
+                    resets_this_hour[current_ssid] = 0
+                else:
+                    resets_this_hour[current_ssid] = max(resets_this_hour.get(current_ssid, 0), 3)
 
             # Wait before next ping
             time.sleep(ping_interval)
