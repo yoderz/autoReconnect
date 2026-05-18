@@ -83,8 +83,20 @@ def write_ssid_usage_csv(data, path=SSID_USAGE_CSV_PATH):
             writer.writerow(["SSID", "Hours used", "Total Resets"])
             for ssid, hours_used, total_resets in rows:
                 writer.writerow([ssid, f"{hours_used:.4f}", int(total_resets)])
+        print_ssid_usage_list(rows)
     except Exception as e:
         print(f"Error writing SSID usage CSV: {e}")
+
+
+def print_ssid_usage_list(rows):
+    """Print SSID usage rows after saving to CSV."""
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    if not rows:
+        print(f"[{timestamp}] SSID usage saved: (empty)")
+        return
+    print(f"[{timestamp}] SSID usage saved:")
+    for ssid, hours_used, total_resets in rows:
+        print(f"  {ssid}: {hours_used:.4f} hours, {int(total_resets)} resets")
 
 
 def _ensure_hourly_csv_header():
@@ -684,8 +696,10 @@ def main():
                 next_hourly_finalize = next_hourly_finalize + timedelta(hours=1)
 
             # Periodic SSID check each hour
+            checked_ssid_display = None
             if now >= next_ssid_check:
                 ssid_now = get_wifi_ssid()
+                checked_ssid_display = ssid_now or current_ssid or "unknown"
                 if ssid_now and ssid_now != current_ssid:
                     record_ssid_event(now, ssid_now)
                 next_ssid_check = next_ssid_check + timedelta(hours=1)
@@ -694,8 +708,11 @@ def main():
             ping_counter += 1
             if ping_counter % ssid_sample_every_pings == 0:
                 ssid_now = get_wifi_ssid()
+                checked_ssid_display = ssid_now or current_ssid or "unknown"
                 if ssid_now and ssid_now != current_ssid:
                     record_ssid_event(now, ssid_now)
+
+            ssid_suffix = f" [{checked_ssid_display}]" if checked_ssid_display else ""
 
             # Ping the host
             success, latency_ms = ping_host(host)
@@ -721,18 +738,18 @@ def main():
             if success:
                 if consecutive_failures > 0:
                     if latency_ms is not None:
-                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ✓ Ping ({latency_ms} ms) (recovered from {consecutive_failures} failures)")
+                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ✓ Ping ({latency_ms} ms) (recovered from {consecutive_failures} failures){ssid_suffix}")
                     else:
-                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ✓ Ping (recovered from {consecutive_failures} failures)")
+                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ✓ Ping (recovered from {consecutive_failures} failures){ssid_suffix}")
                 else:
                     if latency_ms is not None:
-                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ✓ Ping ({latency_ms} ms)")
+                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ✓ Ping ({latency_ms} ms){ssid_suffix}")
                     else:
-                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ✓ Ping ")
+                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ✓ Ping{ssid_suffix}")
                 consecutive_failures = 0
             else:
                 consecutive_failures += 1
-                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ✗ Failed ({consecutive_failures}/{required_failures} consecutive_failures)")
+                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ✗ Failed ({consecutive_failures}/{required_failures} consecutive_failures){ssid_suffix}")
                 
                 # If we've reached the threshold, reconnect WiFi
                 if consecutive_failures >= required_failures:
