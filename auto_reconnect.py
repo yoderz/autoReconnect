@@ -523,105 +523,174 @@ def connect_to_wifi_profile(profile_name):
         return False
 
 
-def reconnect_wifi():
+PING_VERIFY_MIN_SUCCESSES = 3
+PING_VERIFY_BURST_COUNT = 5
+CONNECT_ESTABLISH_WAIT_SEC = 12
+MAX_RESETS_PER_SSID_PER_HOUR = 3
+
+
+def verify_connection_healthy(host="www.google.com", wait_seconds=CONNECT_ESTABLISH_WAIT_SEC):
+    """Wait for link, then burst-ping. Returns True if connection looks usable."""
+    print(f"\nWaiting {wait_seconds} seconds for connection to establish...")
+    time.sleep(wait_seconds)
+    successes = ping_burst(host=host, count=PING_VERIFY_BURST_COUNT)
+    if successes >= PING_VERIFY_MIN_SUCCESSES:
+        print(f"✓ Connection looks healthy ({successes}/{PING_VERIFY_BURST_COUNT} pings succeeded)")
+        return True
+    print(f"⚠ Connection still looks poor ({successes}/{PING_VERIFY_BURST_COUNT} pings succeeded)")
+    return False
+
+
+def get_ranked_ssid_candidates(ssid_usage, saved_profiles=None, exclude_ssid=None, limit=5):
+    """Return saved profile names to try, ranked by prior usage."""
+    if saved_profiles is None:
+        saved_profiles = list_saved_wifi_profiles()
+    ranked = sorted(
+        ssid_usage.items(),
+        key=lambda kv: (kv[1].get("hours_used", 0.0), kv[1].get("total_resets", 0), kv[0]),
+        reverse=True,
+    )
+    candidates = [ssid for ssid, _v in ranked if ssid in saved_profiles and ssid != exclude_ssid]
+    if not candidates:
+        candidates = sorted(p for p in saved_profiles if p != exclude_ssid)
+    return candidates[:limit]
+
+
+def try_saved_wifi_profiles(host, ssid_usage, exclude_ssid=None, limit=5):
     """
-    Disconnect and reconnect WiFi.
+    Try connecting to ranked saved WiFi profiles until one passes the ping check.
+    Returns (success, connected_profile_name).
     """
-    print("\n" + "="*50)
+    saved_profiles = list_saved_wifi_profiles()
+    if not saved_profiles:
+        print("No saved WiFi profiles found.")
+        return False, None
+
+    candidates = get_ranked_ssid_candidates(ssid_usage, saved_profiles, exclude_ssid, limit)
+    if not candidates:
+        print("No alternative saved WiFi profiles to try.")
+        return False, None
+
+    for candidate in candidates:
+        print(f"Trying SSID/profile: {candidate}")
+        if not connect_to_wifi_profile(candidate):
+            print("  connect failed")
+            continue
+        if verify_connection_healthy(host):
+            return True, candidate
+        print(f"  skipping {candidate} (connection not healthy)")
+
+    return False, None
+
+
+def wlan_disconnect():
+    """Disconnect WiFi. Returns True if disconnect command succeeded."""
+    print("\nDisconnecting WiFi...")
+    try:
+        result = subprocess.run(
+            ["netsh", "wlan", "disconnect"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            print("WiFi disconnected successfully")
+            return True
+        print(f"Disconnect command output: {result.stdout}")
+        print(f"Disconnect command error: {result.stderr}")
+        return False
+    except Exception as e:
+        print(f"Error disconnecting WiFi: {e}")
+        return False
+
+
+def connect_wifi_target(ssid, ssid_usage, host):
+    """
+    Connect to the given SSID/profile, or walk saved profiles if unknown.
+    Returns (success, profile_name_used).
+    """
+    targets = []
+    if ssid:
+        targets.append(ssid)
+        profile_name = get_wifi_profile_name()
+        if profile_name and profile_name not in targets:
+            targets.append(profile_name)
+    else:
+        profile_name = get_wifi_profile_name()
+        if profile_name:
+            targets.append(profile_name)
+
+    for target in targets:
+        print(f"Connecting to: {target}")
+        if connect_to_wifi_profile(target):
+            print(f"WiFi reconnection initiated for: {target}")
+            return True, target
+        print(f"  connect to {target} failed")
+
+    print("Could not connect using current SSID/profile. Trying saved profiles...")
+    return try_saved_wifi_profiles(host, ssid_usage)
+
+
+def reconnect_wifi(host="www.google.com", ssid_usage=None, resets_this_hour=None):
+    """
+    Disconnect and reconnect WiFi. Verifies with a ping burst; does not accept a poor link.
+    If the current SSID is still under the hourly reset cap, retries disconnect/reconnect once.
+    Otherwise tries ranked saved profiles.
+    """
+    ssid_usage = ssid_usage if ssid_usage is not None else {}
+    resets_this_hour = resets_this_hour if resets_this_hour is not None else {}
+
+    print("\n" + "=" * 50)
     print("WiFi Reconnection Attempt")
-    print("="*50)
-    
-    # Get current SSID
+    print("=" * 50)
+
     ssid = get_wifi_ssid()
     if not ssid:
         print("Warning: Could not detect current WiFi SSID")
         print("Attempting to disconnect anyway...")
     else:
         print(f"Current WiFi SSID: {ssid}")
-    
-    # Disconnect WiFi
-    print("\nDisconnecting WiFi...")
+
     try:
-        result = subprocess.run(
-            ["netsh", "wlan", "disconnect"],
-            capture_output=True,
-            text=True
-        )
-        if result.returncode == 0:
-            print("WiFi disconnected successfully")
-        else:
-            print(f"Disconnect command output: {result.stdout}")
-            print(f"Disconnect command error: {result.stderr}")
-    except Exception as e:
-        print(f"Error disconnecting WiFi: {e}")
-        return False
-    
-    # Wait a moment before reconnecting
-    print("\nWaiting 2 seconds before reconnecting...")
-    time.sleep(2)
-    
-    # Reconnect WiFi
-    print("Reconnecting WiFi...")
-    try:
-        if ssid:
-            # Try to connect using SSID
-            result = subprocess.run(
-                ["netsh", "wlan", "connect", f"name={ssid}"],
-                capture_output=True,
-                text=True
-            )
-            if result.returncode == 0:
-                print(f"WiFi reconnection initiated for: {ssid}")
-            else:
-                # If SSID connection fails, try getting profile name
-                profile_name = get_wifi_profile_name()
-                if profile_name:
-                    result = subprocess.run(
-                        ["netsh", "wlan", "connect", f"name={profile_name}"],
-                        capture_output=True,
-                        text=True
-                    )
-                    if result.returncode == 0:
-                        print(f"WiFi reconnection initiated using profile: {profile_name}")
-                    else:
-                        print(f"Reconnection failed. Output: {result.stdout}")
-                        print(f"Error: {result.stderr}")
-                        return False
-                else:
-                    print("Could not determine profile name. Please reconnect manually.")
-                    return False
-        else:
-            # Try to get profile name and connect
-            profile_name = get_wifi_profile_name()
-            if profile_name:
-                result = subprocess.run(
-                    ["netsh", "wlan", "connect", f"name={profile_name}"],
-                    capture_output=True,
-                    text=True
-                )
-                if result.returncode == 0:
-                    print(f"WiFi reconnection initiated using profile: {profile_name}")
-                else:
-                    print(f"Reconnection failed. Output: {result.stdout}")
-                    print(f"Error: {result.stderr}")
-                    return False
-            else:
-                print("Could not determine WiFi profile. Please reconnect manually.")
-                return False
-        
-        # Wait a bit for connection to establish
-        print("\nWaiting 5 seconds for connection to establish...")
-        time.sleep(5)
-        
-        # Verify connection (burst ping)
-        successes = ping_burst(count=5)
-        if successes >= 3:
-            print(f"✓ Connection looks healthy ({successes}/5 pings succeeded)")
-            return True
-        else:
-            print(f"⚠ Connection still looks poor ({successes}/5 pings succeeded)")
+        if not wlan_disconnect():
             return False
-            
+
+        print("\nWaiting 2 seconds before reconnecting...")
+        time.sleep(2)
+
+        print("Reconnecting WiFi...")
+        connected, _profile = connect_wifi_target(ssid, ssid_usage, host)
+        if not connected:
+            return False
+
+        if verify_connection_healthy(host):
+            return True
+
+        reset_count = resets_this_hour.get(current_ssid, 0)
+        if reset_count < MAX_RESETS_PER_SSID_PER_HOUR:
+            print(
+                f"\nPoor connection on '{current_ssid}' "
+                f"({reset_count}/{MAX_RESETS_PER_SSID_PER_HOUR} resets this hour); "
+                "retrying disconnect/reconnect..."
+            )
+            if not wlan_disconnect():
+                pass
+            else:
+                print("\nWaiting 2 seconds before reconnecting...")
+                time.sleep(2)
+                same_target = get_wifi_ssid() or ssid or current_ssid
+                connected, _profile = connect_wifi_target(same_target, ssid_usage, host)
+                if connected and verify_connection_healthy(host):
+                    return True
+
+        print(
+            f"\nPoor connection persists "
+            f"({reset_count} resets on '{current_ssid}' this hour); trying other saved SSIDs..."
+        )
+        ok, _new_ssid = try_saved_wifi_profiles(
+            host, ssid_usage, exclude_ssid=current_ssid
+        )
+        return ok
+
     except Exception as e:
         print(f"Error reconnecting WiFi: {e}")
         return False
@@ -754,7 +823,7 @@ def main():
                 # If we've reached the threshold, reconnect WiFi
                 if consecutive_failures >= required_failures:
                     print(f"\n⚠ {consecutive_failures} consecutive failures!")
-                    reconnect_wifi()
+                    reconnect_wifi(host, ssid_usage, resets_this_hour)
                     record_reset()
                     # Record new SSID from this point forward
                     record_ssid_event(datetime.now(), get_wifi_ssid())
@@ -774,7 +843,7 @@ def main():
                 slow_count = sum(1 for is_slow_entry in latency_window if is_slow_entry)
                 if slow_count >= slow_threshold_count:
                     print(f"\n⚠ Slow connection: {slow_count} of last {window_size} pings exceeded {latency_threshold_ms} ms")
-                    reconnect_wifi()
+                    reconnect_wifi(host, ssid_usage, resets_this_hour)
                     record_reset()
                     # Record new SSID from this point forward
                     record_ssid_event(datetime.now(), get_wifi_ssid())
@@ -792,40 +861,25 @@ def main():
             # If we've reset the current SSID 3 times within this hour, try top 5 SSIDs
             hour_key = _current_hour_key()
             current_ssid_resets = resets_this_hour.get(current_ssid, 0)
-            if current_ssid_resets >= 3:
-                print(f"\n⚠ SSID '{current_ssid}' has been reset {current_ssid_resets} times this hour ({hour_key.strftime('%Y-%m-%d %H:00')}). Trying top SSIDs...")
-
-                saved_profiles = list_saved_wifi_profiles()
-                # Rank by hours_used desc
-                ranked = sorted(
-                    ssid_usage.items(),
-                    key=lambda kv: (kv[1].get("hours_used", 0.0), kv[1].get("total_resets", 0), kv[0]),
-                    reverse=True,
+            if current_ssid_resets >= MAX_RESETS_PER_SSID_PER_HOUR:
+                print(
+                    f"\n⚠ SSID '{current_ssid}' has been reset {current_ssid_resets} times this hour "
+                    f"({hour_key.strftime('%Y-%m-%d %H:00')}). Trying top SSIDs..."
                 )
-                candidates = [ssid for ssid, _v in ranked if ssid in saved_profiles and ssid != current_ssid][:5]
 
-                switched = False
-                for candidate in candidates:
-                    print(f"Trying SSID/profile: {candidate}")
-                    if not connect_to_wifi_profile(candidate):
-                        print("  connect failed")
-                        continue
-                    time.sleep(5)
-                    successes = ping_burst(host=host, count=5)
-                    print(f"  ping burst: {successes}/5")
-                    if successes >= 3:
-                        record_ssid_event(datetime.now(), candidate)
-                        consecutive_failures = 0
-                        latency_window.clear()
-                        switched = True
-                        print(f"✓ Switched to {candidate}")
-                        break
-
-                # Avoid retrying failover every loop once threshold reached
+                switched, candidate = try_saved_wifi_profiles(
+                    host, ssid_usage, exclude_ssid=current_ssid
+                )
                 if switched:
+                    record_ssid_event(datetime.now(), candidate)
+                    consecutive_failures = 0
+                    latency_window.clear()
+                    print(f"✓ Switched to {candidate}")
                     resets_this_hour[current_ssid] = 0
                 else:
-                    resets_this_hour[current_ssid] = max(resets_this_hour.get(current_ssid, 0), 3)
+                    resets_this_hour[current_ssid] = max(
+                        resets_this_hour.get(current_ssid, 0), MAX_RESETS_PER_SSID_PER_HOUR
+                    )
 
             # Wait before next ping
             time.sleep(ping_interval)
