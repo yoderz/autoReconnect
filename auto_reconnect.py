@@ -529,10 +529,11 @@ CONNECT_ESTABLISH_WAIT_SEC = 12
 MAX_RESETS_PER_SSID_PER_HOUR = 3
 
 
-def verify_connection_healthy(host="www.google.com", wait_seconds=CONNECT_ESTABLISH_WAIT_SEC):
+def verify_connection_healthy(host="www.google.com", wait_seconds=CONNECT_ESTABLISH_WAIT_SEC, sleep_before_ping=True):
     """Wait for link, then burst-ping. Returns True if connection looks usable."""
-    print(f"\nWaiting {wait_seconds} seconds for connection to establish...")
-    time.sleep(wait_seconds)
+    if sleep_before_ping:
+        print(f"\nWaiting {wait_seconds} seconds for connection to establish...")
+        time.sleep(wait_seconds)
     successes = ping_burst(host=host, count=PING_VERIFY_BURST_COUNT)
     if successes >= PING_VERIFY_MIN_SUCCESSES:
         print(f"✓ Connection looks healthy ({successes}/{PING_VERIFY_BURST_COUNT} pings succeeded)")
@@ -603,9 +604,9 @@ def wlan_disconnect():
         return False
 
 
-def connect_wifi_target(ssid, ssid_usage, host):
+def connect_wifi_target(ssid):
     """
-    Connect to the given SSID/profile, or walk saved profiles if unknown.
+    Connect to the given SSID/profile name via netsh (no verification).
     Returns (success, profile_name_used).
     """
     targets = []
@@ -626,8 +627,7 @@ def connect_wifi_target(ssid, ssid_usage, host):
             return True, target
         print(f"  connect to {target} failed")
 
-    print("Could not connect using current SSID/profile. Trying saved profiles...")
-    return try_saved_wifi_profiles(host, ssid_usage)
+    return False, None
 
 
 def reconnect_wifi(host="www.google.com", ssid_usage=None, resets_this_hour=None):
@@ -658,9 +658,10 @@ def reconnect_wifi(host="www.google.com", ssid_usage=None, resets_this_hour=None
         time.sleep(2)
 
         print("Reconnecting WiFi...")
-        connected, _profile = connect_wifi_target(ssid, ssid_usage, host)
+        connected, _profile = connect_wifi_target(ssid)
         if not connected:
-            return False
+            print("Could not connect using current SSID/profile. Trying saved profiles...")
+            return try_saved_wifi_profiles(host, ssid_usage)[0]
 
         if verify_connection_healthy(host):
             return True
@@ -678,18 +679,15 @@ def reconnect_wifi(host="www.google.com", ssid_usage=None, resets_this_hour=None
                 print("\nWaiting 2 seconds before reconnecting...")
                 time.sleep(2)
                 same_target = get_wifi_ssid() or ssid or current_ssid
-                connected, _profile = connect_wifi_target(same_target, ssid_usage, host)
-                if connected and verify_connection_healthy(host):
+                connected, _profile = connect_wifi_target(same_target)
+                if connected and verify_connection_healthy(host, sleep_before_ping=False):
                     return True
 
         print(
             f"\nPoor connection persists "
             f"({reset_count} resets on '{current_ssid}' this hour); trying other saved SSIDs..."
         )
-        ok, _new_ssid = try_saved_wifi_profiles(
-            host, ssid_usage, exclude_ssid=current_ssid
-        )
-        return ok
+        return try_saved_wifi_profiles(host, ssid_usage, exclude_ssid=current_ssid)[0]
 
     except Exception as e:
         print(f"Error reconnecting WiFi: {e}")
