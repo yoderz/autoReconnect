@@ -10,6 +10,7 @@ import sys
 import re
 import csv
 import os
+import winsound
 from collections import deque
 from datetime import datetime, timedelta
 
@@ -29,6 +30,26 @@ HOURLY_CSV_LOG_PATH = "auto_reconnect_hourly.csv"
 
 # Persistent SSID usage log (across runs)
 SSID_USAGE_CSV_PATH = "ssid_usage.csv"
+
+
+def play_success_chime():
+    """Gentle chime for a successful reconnect."""
+    try:
+        winsound.MessageBeep(winsound.MB_ICONASTERISK)
+    except Exception:
+        pass
+
+
+def play_failure_beep():
+    """Quiet/plain beep for a reconnect failure."""
+    try:
+        # Short low-ish tone; volume is controlled by system settings.
+        winsound.Beep(440, 120)
+    except Exception:
+        try:
+            winsound.MessageBeep(winsound.MB_ICONHAND)
+        except Exception:
+            pass
 
 
 def load_ssid_usage_csv(path=SSID_USAGE_CSV_PATH):
@@ -661,9 +682,15 @@ def reconnect_wifi(host="www.google.com", ssid_usage=None, resets_this_hour=None
         connected, _profile = connect_wifi_target(ssid)
         if not connected:
             print("Could not connect using current SSID/profile. Trying saved profiles...")
-            return try_saved_wifi_profiles(host, ssid_usage)[0]
+            ok = try_saved_wifi_profiles(host, ssid_usage)[0]
+            if ok:
+                play_success_chime()
+            else:
+                play_failure_beep()
+            return ok
 
         if verify_connection_healthy(host):
+            play_success_chime()
             return True
 
         reset_count = resets_this_hour.get(current_ssid, 0)
@@ -681,16 +708,23 @@ def reconnect_wifi(host="www.google.com", ssid_usage=None, resets_this_hour=None
                 same_target = get_wifi_ssid() or ssid or current_ssid
                 connected, _profile = connect_wifi_target(same_target)
                 if connected and verify_connection_healthy(host, sleep_before_ping=False):
+                    play_success_chime()
                     return True
 
         print(
             f"\nPoor connection persists "
             f"({reset_count} resets on '{current_ssid}' this hour); trying other saved SSIDs..."
         )
-        return try_saved_wifi_profiles(host, ssid_usage, exclude_ssid=current_ssid)[0]
+        ok = try_saved_wifi_profiles(host, ssid_usage, exclude_ssid=current_ssid)[0]
+        if ok:
+            play_success_chime()
+        else:
+            play_failure_beep()
+        return ok
 
     except Exception as e:
         print(f"Error reconnecting WiFi: {e}")
+        play_failure_beep()
         return False
 
 
@@ -873,11 +907,13 @@ def main():
                     consecutive_failures = 0
                     latency_window.clear()
                     print(f"✓ Switched to {candidate}")
+                    play_success_chime()
                     resets_this_hour[current_ssid] = 0
                 else:
                     resets_this_hour[current_ssid] = max(
                         resets_this_hour.get(current_ssid, 0), MAX_RESETS_PER_SSID_PER_HOUR
                     )
+                    play_failure_beep()
 
             # Wait before next ping
             time.sleep(ping_interval)
