@@ -2,6 +2,7 @@
 """
 Auto Reconnect Script
 Pings www.google.com and reconnects WiFi if 4 consecutive failures occur.
+IMPROVED: Checks for available WiFi signals before attempting to connect to a new SSID.
 """
 
 import subprocess
@@ -530,6 +531,51 @@ def list_saved_wifi_profiles():
     return profiles
 
 
+def get_available_wifi_networks():
+    """
+    Get the set of WiFi networks currently broadcasting (available to connect to).
+    
+    Returns:
+        Set of SSID strings that are currently available
+    """
+    available = set()
+    try:
+        result = subprocess.run(
+            ["netsh", "wlan", "show", "networks"],
+            capture_output=True,
+            text=True
+        )
+        if result.returncode != 0:
+            return available
+        
+        # Parse output for SSID entries
+        # Typical line: "SSID 1 : MyNetworkName"
+        for line in result.stdout.splitlines():
+            match = re.search(r"SSID\s+\d+\s*:\s*(.+)", line)
+            if match:
+                ssid = match.group(1).strip()
+                if ssid:  # Ignore empty SSIDs
+                    available.add(ssid)
+    except Exception as e:
+        print(f"Error listing available WiFi networks: {e}")
+    
+    return available
+
+
+def is_wifi_network_available(ssid):
+    """
+    Check if a specific WiFi network (SSID) is currently available/broadcasting.
+    
+    Args:
+        ssid: The SSID to check for
+    
+    Returns:
+        True if the SSID is available, False otherwise
+    """
+    available = get_available_wifi_networks()
+    return ssid in available
+
+
 def connect_to_wifi_profile(profile_name):
     """Attempt to connect to a saved WiFi profile by name."""
     try:
@@ -581,6 +627,7 @@ def get_ranked_ssid_candidates(ssid_usage, saved_profiles=None, exclude_ssid=Non
 def try_saved_wifi_profiles(host, ssid_usage, exclude_ssid=None, limit=5):
     """
     Try connecting to ranked saved WiFi profiles until one passes the ping check.
+    Only attempts to connect to profiles that have an available WiFi signal.
     Returns (success, connected_profile_name).
     """
     saved_profiles = list_saved_wifi_profiles()
@@ -593,7 +640,18 @@ def try_saved_wifi_profiles(host, ssid_usage, exclude_ssid=None, limit=5):
         print("No alternative saved WiFi profiles to try.")
         return False, None
 
+    # Get currently available WiFi networks
+    available_networks = get_available_wifi_networks()
+    if not available_networks:
+        print("No WiFi networks available (no signal detected).")
+        return False, None
+
     for candidate in candidates:
+        # Check if this SSID is currently available before trying to connect
+        if candidate not in available_networks:
+            print(f"SSID '{candidate}' not available (not broadcasting). Skipping.")
+            continue
+        
         print(f"Trying SSID/profile: {candidate}")
         if not connect_to_wifi_profile(candidate):
             print("  connect failed")
