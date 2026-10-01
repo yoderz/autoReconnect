@@ -511,6 +511,34 @@ def get_wifi_ssid():
         return None
 
 
+def is_wifi_radio_on():
+    """
+    Return True if the WiFi software radio appears to be on (Windows).
+
+    When WiFi is toggled off in Settings or Action Center, netsh typically reports
+    "Software Off" under Radio status. A disabled adapter yields no wireless interface.
+    """
+    try:
+        result = subprocess.run(
+            ["netsh", "wlan", "show", "interfaces"],
+            capture_output=True,
+            text=True,
+        )
+        stdout = result.stdout or ""
+        if re.search(r"there is no wireless interface on the system", stdout, re.IGNORECASE):
+            return False
+        if re.search(r"Software\s+Off", stdout, re.IGNORECASE):
+            return False
+        if re.search(r"Hardware\s+Off", stdout, re.IGNORECASE):
+            return False
+        if re.search(r"^\s*Name\s+:", stdout, re.MULTILINE):
+            return True
+        return False
+    except Exception as e:
+        print(f"Error checking WiFi radio state: {e}")
+        return True
+
+
 def list_saved_wifi_profiles():
     """Return a set of saved WiFi profile names from Windows."""
     profiles = set()
@@ -798,6 +826,7 @@ def main():
     consecutive_failures = 0
     required_failures = 6
     ping_interval = 5  # seconds between pings
+    wifi_off_check_interval = 20  # seconds between checks while WiFi radio is off
 
     # Latency-based reconnect settings
     latency_threshold_ms = 300
@@ -829,6 +858,7 @@ def main():
     # Ping counter for sampling SSID every N pings
     ping_counter = 0
     ssid_sample_every_pings = 12
+    wifi_radio_was_off = False
 
     # Schedule periodic SSID checks on the hour
     hour_start = script_start_time.replace(minute=0, second=0, microsecond=0)
@@ -872,6 +902,27 @@ def main():
                     record_ssid_event(now, ssid_now)
 
             ssid_suffix = f" [{checked_ssid_display}]" if checked_ssid_display else ""
+
+            if not is_wifi_radio_on():
+                if not wifi_radio_was_off:
+                    print(
+                        f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] "
+                        "WiFi radio is off — skipping pings until it is turned back on"
+                    )
+                    wifi_radio_was_off = True
+                    consecutive_failures = 0
+                    latency_window.clear()
+                time.sleep(wifi_off_check_interval)
+                continue
+
+            if wifi_radio_was_off:
+                print(
+                    f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] "
+                    "WiFi radio is on — resuming pings"
+                )
+                wifi_radio_was_off = False
+                consecutive_failures = 0
+                latency_window.clear()
 
             # Ping the host
             success, latency_ms = ping_host(host)
