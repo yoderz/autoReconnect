@@ -691,6 +691,32 @@ def try_saved_wifi_profiles(host, ssid_usage, exclude_ssid=None, limit=5):
     return False, None
 
 
+def ensure_internet_after_wifi_available(host, ssid_usage, context=""):
+    """
+    Wait for the link, burst-ping to verify internet, then try ranked saved SSIDs if needed.
+    Used at script startup and when the WiFi radio is turned back on.
+    """
+    label = f" ({context})" if context else ""
+    print(f"\n{'=' * 50}")
+    print(f"Checking internet connectivity{label}...")
+    print(f"{'=' * 50}")
+
+    if verify_connection_healthy(host, wait_seconds=0, sleep_before_ping=False):
+        return True
+
+    print("\nNo usable internet on current WiFi — trying saved profiles (ranked)...")
+    switched, candidate = try_saved_wifi_profiles(host, ssid_usage)
+    if switched:
+        record_ssid_event(datetime.now(), candidate)
+        print(f"✓ Connected with usable internet via: {candidate}")
+        play_success_chime()
+        return True
+
+    print("Could not establish a healthy connection from saved profiles.")
+    play_failure_beep()
+    return False
+
+
 def wlan_disconnect():
     """Disconnect WiFi. Returns True if disconnect command succeeded."""
     print("\nDisconnecting WiFi...")
@@ -826,7 +852,7 @@ def main():
     consecutive_failures = 0
     required_failures = 6
     ping_interval = 5  # seconds between pings
-    wifi_off_check_interval = 20  # seconds between checks while WiFi radio is off
+    wifi_off_check_interval = 10  # seconds between checks while WiFi radio is off
 
     # Latency-based reconnect settings
     latency_threshold_ms = 300
@@ -870,6 +896,9 @@ def main():
     # Schedule hourly SSID usage finalization on the hour
     current_hour_start, current_hour_end = _hour_window(script_start_time)
     next_hourly_finalize = current_hour_start + timedelta(hours=1)
+
+    if is_wifi_radio_on():
+        ensure_internet_after_wifi_available(host, ssid_usage, "startup")
 
     try:
         while True:
@@ -918,11 +947,14 @@ def main():
             if wifi_radio_was_off:
                 print(
                     f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] "
-                    "WiFi radio is on — resuming pings"
+                    "WiFi radio is on — resuming monitoring"
                 )
                 wifi_radio_was_off = False
                 consecutive_failures = 0
                 latency_window.clear()
+                ensure_internet_after_wifi_available(
+                    host, ssid_usage, "WiFi radio restored"
+                )
 
             # Ping the host
             success, latency_ms = ping_host(host)
